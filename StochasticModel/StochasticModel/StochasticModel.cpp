@@ -4,6 +4,9 @@
 		1) case isolation
 		2) contact tracing
 		3) mask wearing
+	Also, there are additional suprespreading events (SSEs) and 
+	simple restriction on people gathering 
+	(restriction on the maximum number of people wich one person can infect)
 
 	[ based on the work of Hellewell J., Abbott S., Gimma A., et al. https://github.com/cmmid/ringbp ]
 
@@ -24,6 +27,9 @@
 using namespace std;
 
 double Inf = numeric_limits<double>::infinity();
+
+int sample = 0; // for counting of cases (for SSE_samples)
+int max_SSE_com = 0;
 
 
 void delayDistribution(double x_start, double x_end, double step) // Weibull distribution: short delay = {shape=1.651524; scale=4.287786}; long delay = {shape=2.305172; scale=9.483875}
@@ -176,6 +182,129 @@ void serialIntervalDistribution(double x_start, double x_end, double step) // Sk
 
 	fout.close();
 }
+
+
+
+void NB_Frechet_distribution(double R0_community)
+{
+	// negative distribution
+	// negative binomial = combination of Gamma and Poisson distributions
+	double disp_com = 0.1;
+	double prob_success = disp_com / (disp_com + R0_community);
+	double gamma_scale = (1.0 - prob_success) / prob_success;
+	gamma_distribution<double> gamma_1(disp_com, gamma_scale);
+
+	disp_com = 0.16;
+	prob_success = disp_com / (disp_com + R0_community);
+	gamma_scale = (1.0 - prob_success) / prob_success;
+	gamma_distribution<double> gamma_2(disp_com, gamma_scale);
+
+	// inverse Weibull = Frechet
+	double alpha = 1.7; // shape (tail) parameter of Frechet distribution
+	double var = 1.0 - (1.0 / alpha);
+	double scale_fr_com = R0_community / tgamma(var);
+	double scale_w_com = 1.0 / scale_fr_com;
+	weibull_distribution<double> weibull_com(alpha, scale_w_com);
+
+	random_device dev;
+	default_random_engine rng(dev()); // random numbers generator
+
+	int num_exp = 1050000;
+	const int SSE_samples = 30;
+	const int range = 10;
+	const int length = range + 2;
+
+	int frequency_SSE[length]; // Frechet a=1.7 (SSEs distr)
+	int frequency_nb[length]; // NB (k=0.1)
+	int frequency_nb_sse[length]; // NB (k=0.1) + SSEs
+
+	double meanR0_nb = 0.0; // NB k=0.1
+	double meanR0_nb_sse = 0.0; // NB (k=0.1) + SSEs
+	double meanR0_SSE = 0.0; // Frechet a=1.7 (SSEs distr)
+
+	for (int i = 0; i < length; i++)
+	{
+		frequency_nb[i] = 0;
+		frequency_nb_sse[i] = 0;
+		frequency_SSE[i] = 0;
+	}
+
+	int number = 0;
+	int number_SSE = 0;
+	double temp = 0.0;
+	int max_SSE = 0;
+	int max_SSE_nb_sse = 0;
+	int num_exp_SSE = 0;
+	for (int i = 0; i < num_exp; i++)
+	{
+		poisson_distribution<int> poisson_1(gamma_1(rng));
+		number = poisson_1(rng);
+		// without extra SSEs
+		if (number >= 0 && number <= range)
+			frequency_nb[number]++;
+		if (number > range)
+			frequency_nb[length - 1]++;
+		meanR0_nb = meanR0_nb + number;
+
+		// with extra SSEs
+		temp = 1.0 / weibull_com(rng);
+		number_SSE = (int)round(temp);
+		if (number_SSE > max_SSE_nb_sse)
+			max_SSE_nb_sse = number_SSE;
+		if (i > 0 && (i % SSE_samples) == 0) 
+		{
+			if (max_SSE_nb_sse >= 0 && max_SSE_nb_sse <= range)
+				frequency_nb_sse[max_SSE_nb_sse]++;
+			if (max_SSE_nb_sse > range)
+				frequency_nb_sse[length - 1]++;
+			meanR0_nb_sse = meanR0_nb_sse + max_SSE_nb_sse;
+			max_SSE_nb_sse = 0;
+		}
+		else
+		{
+			if (number >= 0 && number <= range)
+				frequency_nb_sse[number]++;
+			if (number > range)
+				frequency_nb_sse[length - 1]++;
+			meanR0_nb_sse = meanR0_nb_sse + number;
+		}
+
+		//only SSE
+		temp = 1.0 / weibull_com(rng);
+		number = (int)round(temp);
+		if (number > max_SSE)
+			max_SSE = number;
+		if (i > 0 && (i % SSE_samples) == 0)
+		{
+			if (max_SSE >= 0 && max_SSE <= range)
+				frequency_SSE[max_SSE]++;
+			if (max_SSE > range)
+				frequency_SSE[length - 1]++;
+			meanR0_SSE = meanR0_SSE + max_SSE;
+			max_SSE = 0;
+			num_exp_SSE++;
+		}
+
+	}
+	meanR0_nb = meanR0_nb / num_exp;
+	meanR0_nb_sse = meanR0_nb_sse / num_exp;
+	meanR0_SSE = meanR0_SSE / num_exp_SSE;
+	ofstream nbout;
+	nbout.open("NB_NB+SSE_means_max10.csv");
+
+	nbout << "Number of secondary cases" << "," << "NB(0.1)" << "," << "NB(0.1)+SSE" << "," << "SSE distr" << "\n";
+	for (int i = 0; i < length; i++)
+	{
+		cout << i << " = " << frequency_nb[i] * 1.0 / num_exp << "; " << frequency_nb_sse[i] * 1.0 / num_exp << ";" << frequency_SSE[i] * 1.0 / num_exp_SSE << endl;
+		nbout << i << "," << frequency_nb[i] * 1.0 / num_exp << "," << frequency_nb_sse[i] * 1.0 / num_exp << "," << frequency_SSE[i] * 1.0 / num_exp_SSE << "\n";
+	}
+	nbout << "\n";
+	nbout << "mean R0" << "," << meanR0_nb << "," << meanR0_nb_sse << "," << meanR0_SSE;
+
+	nbout.close();
+}
+
+
 
 
 struct Case_data
@@ -417,6 +546,7 @@ struct Outbreak_step_output outbreak_step(Case_data case_data, double R0_iso, do
 	vector<int> new_cases_mask(case_data.array_size); // number of new cases with using reduced R0 --> infector wears mask
 	vector<bool> mask_wearing;		// who from new cases will be in mask
 
+	const int SSE_samples = 30;
 	/* For each case in case_data, draw new_cases from a negative binomial distribution with an R0 and dispersion dependent on if isolated = TRUE */
 	for (int i = 0; i < case_data.array_size; i++)
 	{
@@ -461,9 +591,50 @@ struct Outbreak_step_output outbreak_step(Case_data case_data, double R0_iso, do
 		gamma_distribution<> gamma_mask(disp_param, gamma_scale_mask);
 		poisson_distribution<> poisson_mask(gamma_mask(rng));
 
+		// Frechet distribution (inverse Weibull distribution)
+		// shape = alpha = 1.7 (estimated from PNAS paper)
+		// scale is defined from definition of mean value for Frechet distribution: mean = m + scale * Gamma(1 - 1/alpha),
+		// where m is location (shift) = 0
+		// In Weibull distribution shape is the same as in Frechet distribution, but scale_weibull = 1/scale_frechet
+
+		int restriction = 15; // restrictions on people gathering => cannot infect more than X people
+		double alpha = 1.7; // shape (tail) parameter of Frechet distribution
+		double var = 1.0 - (1.0 / alpha);
+		double scale_fr_com = mean_com / tgamma(var);
+		double scale_fr_mask = mean_mask / tgamma(var);
+
+		double scale_w_com = 1.0 / scale_fr_com;
+		double scale_w_mask = 1.0 / scale_fr_mask;
+
+		weibull_distribution<double> weibull_com(alpha, scale_w_com);
+		weibull_distribution<double> weibull_mask(alpha, scale_w_mask);
+
+		// inverse Weibull = Frechet
+		double new_cases_frechet_com = 1.0 / weibull_com(rng);
+		double new_cases_frechet_mask = 1.0 / weibull_mask(rng);
+
 		//case_data.new_cases[i] = neg_binomial(rng);
 		// 1 -- generate new cases with initial R0 (community)
 		case_data.new_cases[i] = poisson_com(rng);
+
+		//SSE (comment/uncomment this part to use extra SSEs)
+		/*sample++;
+		new_cases_frechet_com = 1.0 / weibull_com(rng);
+		var = (int)round(new_cases_frechet_com);
+		if (var > max_SSE_com)
+			max_SSE_com = var;
+
+		if ((sample % SSE_samples) == 0)
+		{
+			if (case_data.new_cases[i] < max_SSE_com)
+				case_data.new_cases[i] = max_SSE_com;
+			max_SSE_com = 0;
+		}*/
+		
+		// restriction (comment/uncomment this part to use restriction on people gathering)
+		/*if (case_data.new_cases[i] > restriction)
+		case_data.new_cases[i] = restriction;*/
+
 		int cases = case_data.new_cases[i];
 		// if wearing all people -- infected and suspected
 		if (all)
@@ -936,23 +1107,26 @@ int main()
 	double num_cases_asym = 20;			// initial number of asymptomatic cases (20)
 	double max_cases = 100000.0;		// max number of cases for running process (5000.0 for outbreak control; 100000.0 for R_eff)
 	double R0_isolated = 0.0;			// R0 for isolated cases
-	double R0_community = 3.5;			// R0 for non-isolated cases
+	double R0_community = 2.5;			// R0 for non-isolated cases
 	double disp_iso = 1.0;				// dispersion parameter for negative binomial distribution for isolated cases
-	double disp_com = 0.16;				// dispersion parameter for negative binomial distribution for non-isolated cases
+	double disp_com = 0.1;				// dispersion parameter for negative binomial distribution for non-isolated cases
 	double k = 0.324;					// proportion of transmission before symptoms onset (1.95 -> 15%); (0.7 -> 30%); (30 -> <1%) (0.324 -> 40%)
 	double delay_shape = 1.651524;		// shape of distribution for delay between symptom onset and isolation
 	double delay_scale = 4.287786;		// scale of distribution for delay between symptom onset and isolation // 2.287786 --> mean=2 // 4.287786 --> mean = 3.8
-	double prob_ascertain = 0.4;		// probability that cases are ascertained by contact tracing
+	double prob_ascertain = 0.6;		// probability that cases are ascertained by contact tracing
 	double prob_asym = 0.15;			// numerical proportion of cases that are subclinical (asymptotic): [0.0; 1.0] (0.15)
 	double prob_asym_asym = 0.5;		// numerical proportion of asymptotic cases from asymptotic cases (0.5)
-	double inf_asym = 0.6;				// infectivity of asymptotic case from initial R0 (0.6 -> 2.5 * 0.6 = 1.5)
+	double inf_asym = 0.75;				// infectivity of asymptotic case from initial R0 (0.75 -> 2.5 * 0.75 = 1.875)
 	double Ra = R0_community * inf_asym;// reproduction number for asymptotic cases
 	bool quarantine = false;			// quaratine is in effect or not (true --> traced contacts are isolated before symptoms onset)
 
 	bool after_symptom = false;		// when people start to wear mask
-	double prob_mask = 0.9;			// probability of wearing mask
+	double prob_mask = 0.7;			// probability of wearing mask
 	double eff_mask = 0.5;			// efficiency of mask wearing
 	bool all = true;				// all people (infected and suspected) wear mask
+
+	// seconady cases distribution
+	//NB_Frechet_distribution(R0_community);
 
 	vector<Model_output> results;
 	struct Model_output model;
@@ -962,10 +1136,8 @@ int main()
 
 
 	ofstream fout_R0;
-	//fout_R0.open("mean_eff_R0_tracrd80%.csv"); // 3)
-	//fout_R0.open("masks_all70%_eff50%_R2.5_traced0%.csv");
 
-	fout_R0.open("R3_sym20_asym20_prob70_tracing_40%.csv");
+	fout_R0.open("R2_s20a20_e50pr70_tr60.csv");
 	// parameters
 	fout_R0 << "num_sim" << "," << "max_days" << "," << "num_sym_cases" << "," << "num_asym_cases" << "," << "max_cases" << "," << "R0_isolated" << "," << "R0_community" << "," << "disp_iso" << ",";
 	fout_R0 << "disp_com" << "," << "trans_before" << "," << "delay_shape" << "," << "delay_scale" << "," << "prob_ascertain" << "," << "prob_asym" << "," << "prob_asym_asym" << ",";
@@ -979,6 +1151,8 @@ int main()
 
 	for (int i = 1; i <= num_sim; i++)
 	{
+		sample = 0;
+		max_SSE_com = 0;
 		printf("\nSimulation #%d\n", i);
 
 		model = outbreak_model(num_initial_cases, num_cases_asym, max_days, max_cases, R0_isolated, R0_community,
